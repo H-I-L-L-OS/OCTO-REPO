@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dan Wyrn 3D: The Electromagnetic Oath</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: #050408;
+      font-family: 'Courier New', Courier, monospace;
+      user-select: none;
+    }
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: #d8d4e8;
+      pointer-events: none;
+      text-shadow: 0 0 8px #000;
+    }
+    h1 {
+      margin: 0 0 8px 0;
+      color: #38bdf8;
+      text-shadow: 0 0 12px #0284c7;
+      font-size: 24px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .stat { font-size: 16px; margin: 4px 0; }
+    .controls {
+      position: absolute;
+      bottom: 20px;
+      width: 100%;
+      text-align: center;
+      color: #8b85a1;
+      font-size: 14px;
+      pointer-events: none;
+    }
+    #gameover {
+      display: none;
+      position: absolute;
+      inset: 0;
+      background: rgba(5, 4, 8, 0.85);
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #e11d48;
+      text-align: center;
+    }
+    #gameover h2 { font-size: 42px; margin-bottom: 10px; text-shadow: 0 0 15px #e11d48; }
+    #gameover p { color: #d8d4e8; font-size: 18px; }
+  </style>
+</head>
+<body>
+
+  <div id="hud">
+    <h1>Dan Wyrn // 3D</h1>
+    <div class="stat" id="hp-text">Vitality: 100%</div>
+    <div class="stat" id="energy-text" style="color:#38bdf8;">Mag-Charge: 100%</div>
+    <div class="stat" id="score-text" style="color:#facc15;">Souls Banished: 0</div>
+  </div>
+
+  <div class="controls">
+    <b>WASD / Arrows:</b> Move | <b>Mouse Aim + Left-Click:</b> Electroman Bolt | <b>Hold Space:</b> 3D Magnetic Repel Dome
+  </div>
+
+  <div id="gameover">
+    <h2>DAN WYRN HAS FALLEN</h2>
+    <p>Press [R] to Reignite the Coil</p>
+  </div>
+
+  <canvas id="gameCanvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Pure Self-Contained 3D Perspective Projection Engine (Zero External Dependencies)
+    const FOV = 520;
+    const cam = { x: 0, y: 16, z: 18, pitch: 0.65 };
+
+    function project3D(wx, wy, wz) {
+      const dx = wx - cam.x;
+      const dy = wy - cam.y;
+      const dz = wz - cam.z;
+
+      const cosP = Math.cos(cam.pitch);
+      const sinP = Math.sin(cam.pitch);
+
+      const ry = dy * cosP - dz * sinP;
+      const rz = dy * sinP + dz * cosP;
+
+      if (rz <= 0.2) return null;
+      const scale = FOV / rz;
+      return {
+        x: canvas.width / 2 + dx * scale,
+        y: canvas.height / 2 - ry * scale,
+        scale: scale,
+        depth: rz
+      };
+    }
+
+    function unprojectFloor(sx, sy, targetY = 1.0) {
+      const nx = (sx - canvas.width / 2) / FOV;
+      const ny = -(sy - canvas.height / 2) / FOV;
+      const cosP = Math.cos(cam.pitch);
+      const sinP = Math.sin(cam.pitch);
+
+      // Ray direction in world space
+      const dirX = nx;
+      const dirY = ny * cosP - sinP;
+      const dirZ = ny * sinP + cosP;
+
+      if (Math.abs(dirY) < 0.001) return { x: 0, z: 0 };
+      const t = (targetY - cam.y) / dirY;
+      return {
+        x: cam.x + dirX * t,
+        z: cam.z + dirZ * t
+      };
+    }
+
+    // Game State
+    let hp = 100, energy = 100, score = 0, gameOver = false;
+    let keys = {}, bolts = [], enemies = [], particles = [], spawnTimer = 0;
+    let mouse = { x: canvas.width / 2, y: canvas.height / 2 };
+
+    const dan = { x: 0, z: 0, speed: 0.22, repelling: false, rot: 0 };
+
+    // Gothic Ruin Pillars in the 3D Arena
+    const pillars = [
+      { x: -12, z: -12, h: 6.5 }, { x: 12, z: -12, h: 6.5 },
+      { x: -12, z: 12, h: 6.5 },  { x: 12, z: 12, h: 6.5 },
+      { x: -20, z: 0, h: 8.0 },   { x: 20, z: 0, h: 8.0 },
+      { x: 0, z: -20, h: 8.0 },   { x: 0, z: 20, h: 8.0 }
+    ];
+
+    window.addEventListener('mousemove', e => {
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+    });
+
+    window.addEventListener('keydown', e => {
+      keys[e.key.toLowerCase()] = true;
+      if (e.code === 'Space') dan.repelling = true;
+      if (e.key.toLowerCase() === 'r' && gameOver) resetGame();
+    });
+
+    window.addEventListener('keyup', e => {
+      keys[e.key.toLowerCase()] = false;
+      if (e.code === 'Space') dan.repelling = false;
+    });
+
+    window.addEventListener('mousedown', () => {
+      if (gameOver) return;
+      const target = unprojectFloor(mouse.x, mouse.y, 1.2);
+      const dx = target.x - dan.x;
+      const dz = target.z - dan.z;
+      const len = Math.hypot(dx, dz) || 1;
+
+      bolts.push({
+        x: dan.x,
+        y: 1.4,
+        z: dan.z,
+        vx: (dx / len) * 0.65,
+        vz: (dz / len) * 0.65,
+        life: 65
+      });
+    });
+
+    function spawnWraith() {
+      const angle = Math.random() * Math.PI * 2;
+      const radius = 25;
+      enemies.push({
+        x: Math.cos(angle) * radius,
+        z: Math.sin(angle) * radius,
+        hp: 2,
+        speed: 0.08 + Math.random() * 0.05,
+        phase: Math.random() * Math.PI * 2
+      });
+    }
+
+    function spawnSparks(wx, wy, wz, color, count = 10) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const spd = 0.08 + Math.random() * 0.18;
+        particles.push({
+          x: wx, y: wy, z: wz,
+          vx: Math.cos(a) * spd,
+          vy: 0.1 + Math.random() * 0.2,
+          vz: Math.sin(a) * spd,
+          life: 25 + Math.random() * 15,
+          color
+        });
+      }
+    }
+
+    function resetGame() {
+      dan.x = 0; dan.z = 0;
+      hp = 100; energy = 100; score = 0; gameOver = false;
+      enemies = []; bolts = []; particles = [];
+      document.getElementById('gameover').style.display = 'none';
+    }
+
+    function update() {
+      if (gameOver) return;
+
+      dan.rot += 0.05;
+      if ((keys['w'] || keys['arrowup']) && dan.z > -26) dan.z -= dan.speed;
+      if ((keys['s'] || keys['arrowdown']) && dan.z < 26) dan.z += dan.speed;
+      if ((keys['a'] || keys['arrowleft']) && dan.x > -26) dan.x -= dan.speed;
+      if ((keys['d'] || keys['arrowright']) && dan.x < 26) dan.x += dan.speed;
+
+      // Smooth 3D camera follow
+      cam.x += (dan.x - cam.x) * 0.08;
+      cam.z += (dan.z + 18 - cam.z) * 0.08;
+
+      if (dan.repelling && energy > 0) {
+        energy -= 0.7;
+      } else {
+        dan.repelling = false;
+        if (energy < 100) energy += 0.3;
+      }
+
+      for (let i = bolts.length - 1; i >= 0; i--) {
+        const b = bolts[i];
+        b.x += b.vx;
+        b.z += b.vz;
+        b.life--;
+        if (b.life <= 0) bolts.splice(i, 1);
+      }
+
+      spawnTimer++;
+      if (spawnTimer > Math.max(25, 75 - Math.floor(score / 40))) {
+        spawnWraith();
+        spawnTimer = 0;
+      }
+
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+        e.phase += 0.06;
+        const dx = dan.x - e.x;
+        const dz = dan.z - e.z;
+        const dist = Math.hypot(dx, dz) || 1;
+        const nx = dx / dist;
+        const nz = dz / dist;
+
+        if (dan.repelling && dist < 5.5) {
+          e.x -= nx * 0.38;
+          e.z -= nz * 0.38;
+        } else {
+          e.x += nx * e.speed;
+          e.z += nz * e.speed;
+        }
+
+        for (let j = bolts.length - 1; j >= 0; j--) {
+          const b = bolts[j];
+          if (Math.hypot(b.x - e.x, b.z - e.z) < 1.3) {
+            e.hp--;
+            spawnSparks(e.x, 1.3, e.z, '#38bdf8', 8);
+            bolts.splice(j, 1);
+            if (e.hp <= 0) {
+              spawnSparks(e.x, 1.3, e.z, '#e11d48', 16);
+              enemies.splice(i, 1);
+              score += 10;
+            }
+            break;
+          }
+        }
+
+        if (dist < 1.4) {
+          hp -= 0.6;
+          if (hp <= 0) {
+            gameOver = true;
+            document.getElementById('gameover').style.display = 'flex';
+          }
+        }
+      }
+
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.z += p.vz;
+        p.vy -= 0.015;
+        p.life--;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+
+      document.getElementById('hp-text').innerText = `Vitality: ${Math.max(0, Math.ceil(hp))}%`;
+      document.getElementById('energy-text').innerText = `Mag-Charge: ${Math.ceil(energy)}%`;
+      document.getElementById('score-text').innerText = `Souls Banished: ${score}`;
+    }
+
+    function draw3DBox(wx, wz, w, h, d, fillTop, fillSide, stroke) {
+      const hw = w / 2, hd = d / 2;
+      const b1 = project3D(wx - hw, 0, wz - hd);
+      const b2 = project3D(wx + hw, 0, wz - hd);
+      const b3 = project3D(wx + hw, 0, wz + hd);
+      const b4 = project3D(wx - hw, 0, wz + hd);
+      const t1 = project3D(wx - hw, h, wz - hd);
+      const t2 = project3D(wx + hw, h, wz - hd);
+      const t3 = project3D(wx + hw, h, wz + hd);
+      const t4 = project3D(wx - hw, h, wz + hd);
+
+      if (!b1 || !b2 || !b3 || !b4 || !t1 || !t2 || !t3 || !t4) return;
+
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1.2;
+
+      // Front face
+      ctx.fillStyle = fillSide;
+      ctx.beginPath();
+      ctx.moveTo(b4.x, b4.y); ctx.lineTo(b3.x, b3.y);
+      ctx.lineTo(t3.x, t3.y); ctx.lineTo(t4.x, t4.y);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+
+      // Top face
+      ctx.fillStyle = fillTop;
+      ctx.beginPath();
+      ctx.moveTo(t1.x, t1.y); ctx.lineTo(t2.x, t2.y);
+      ctx.lineTo(t3.x, t3.y); ctx.lineTo(t4.x, t4.y);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+
+    function draw() {
+      ctx.fillStyle = '#06050a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // 1. Draw 3D Obsidian Arena Grid
+      const arenaSize = 28;
+      const step = 4;
+      for (let x = -arenaSize; x <= arenaSize; x += step) {
+        const p1 = project3D(x, 0, -arenaSize);
+        const p2 = project3D(x, 0, arenaSize);
+        if (p1 && p2) {
+          ctx.strokeStyle = x === 0 ? 'rgba(56, 189, 248, 0.35)' : 'rgba(56, 189, 248, 0.12)';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        }
+      }
+      for (let z = -arenaSize; z <= arenaSize; z += step) {
+        const p1 = project3D(-arenaSize, 0, z);
+        const p2 = project3D(arenaSize, 0, z);
+        if (p1 && p2) {
+          ctx.strokeStyle = z === 0 ? 'rgba(56, 189, 248, 0.35)' : 'rgba(56, 189, 248, 0.12)';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        }
+      }
+
+      // Collect renderable 3D objects for depth sorting (Painter's Algorithm)
+      const renderList = [];
+
+      pillars.forEach(p => {
+        const proj = project3D(p.x, 0, p.z);
+        if (proj) renderList.push({ type: 'pillar', depth: proj.depth, data: p });
+      });
+
+      enemies.forEach(e => {
+        const proj = project3D(e.x, 1.2, e.z);
+        if (proj) renderList.push({ type: 'enemy', depth: proj.depth, data: e, proj });
+      });
+
+      bolts.forEach(b => {
+        const proj = project3D(b.x, b.y, b.z);
+        if (proj) renderList.push({ type: 'bolt', depth: proj.depth, data: b, proj });
+      });
+
+      const danProj = project3D(dan.x, 0, dan.z);
+      if (danProj) renderList.push({ type: 'dan', depth: danProj.depth, proj: danProj });
+
+      renderList.sort((a, b) => b.depth - a.depth);
+
+      // 2. Render Sorted 3D Entities
+      renderList.forEach(item => {
+        if (item.type === 'pillar') {
+          draw3DBox(item.data.x, item.data.z, 1.6, item.data.h, 1.6, '#1e1b2e', '#110f1c', '#312e4a');
+        } else if (item.type === 'dan') {
+          const base = project3D(dan.x, 0, dan.z);
+          const apex = project3D(dan.x, 2.5, dan.z);
+          const core = project3D(dan.x, 2.9 + Math.sin(dan.rot) * 0.15, dan.z);
+
+          // Ground aura glow
+          const grad = ctx.createRadialGradient(base.x, base.y, 2, base.x, base.y, 3.2 * base.scale);
+          grad.addColorStop(0, 'rgba(56, 189, 248, 0.35)');
+          grad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath(); ctx.arc(base.x, base.y, 3.2 * base.scale, 0, Math.PI * 2); ctx.fill();
+
+          // Cloak cone
+          const r = 0.85 * base.scale;
+          ctx.fillStyle = '#171429';
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(apex.x, apex.y);
+          ctx.lineTo(base.x - r, base.y);
+          ctx.lineTo(base.x + r, base.y);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+
+          // Floating Electromagnetic Core
+          ctx.fillStyle = '#7dd3fc';
+          ctx.shadowBlur = 14;
+          ctx.shadowColor = '#38bdf8';
+          ctx.beginPath();
+          ctx.arc(core.x, core.y, 0.35 * core.scale, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+
+          // 3D Wireframe Repel Dome
+          if (dan.repelling) {
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+            ctx.lineWidth = 2;
+            const domeR = 5.5 * base.scale;
+            ctx.beginPath();
+            ctx.arc(base.x, base.y - 1.2 * base.scale, domeR, Math.PI, 0);
+            ctx.stroke();
+
+            // Latitude ring
+            ctx.beginPath();
+            ctx.ellipse(base.x, base.y - 0.5 * base.scale, domeR, domeR * 0.42, 0, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        } else if (item.type === 'enemy') {
+          const e = item.data;
+          const hoverY = 1.2 + Math.sin(e.phase) * 0.25;
+          const p = project3D(e.x, hoverY, e.z);
+          const shadow = project3D(e.x, 0, e.z);
+
+          if (shadow) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.beginPath();
+            ctx.ellipse(shadow.x, shadow.y, 0.8 * shadow.scale, 0.4 * shadow.scale, 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          if (p) {
+            const rad = 0.85 * p.scale;
+            ctx.fillStyle = '#3b071e';
+            ctx.strokeStyle = '#e11d48';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let k = 0; k < 6; k++) {
+              const ang = e.phase * 0.5 + (k * Math.PI) / 3;
+              const vx = p.x + Math.cos(ang) * rad;
+              const vy = p.y + Math.sin(ang) * rad;
+              if (k === 0) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
+            }
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+          }
+        } else if (item.type === 'bolt') {
+          const p = item.proj;
+          ctx.fillStyle = '#e0f2fe';
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = '#38bdf8';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 0.28 * p.scale, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
+      });
+
+      // 3. Render 3D Sparks
+      particles.forEach(pt => {
+        const p = project3D(pt.x, pt.y, pt.z);
+        if (p) {
+          ctx.fillStyle = pt.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 0.14 * p.scale, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      });
+    }
+
+    function loop() {
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+  </script>
+</body>
+</html>
